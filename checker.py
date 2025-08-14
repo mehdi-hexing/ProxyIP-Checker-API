@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 # --- Settings ---
 # !! Replace with your actual assigned port from serv00 !!
-HARDCODED_PORT = 33163
+HARDCODED_PORT = 12345
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
