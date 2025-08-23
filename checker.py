@@ -1,5 +1,3 @@
-# checker.py# The final, correct, and clean version. It properly parses the nested JSON from the risk API.
-
 import socket
 import ssl
 import json
@@ -20,12 +18,12 @@ semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 # --- Logic ---
 IP_RESOLVER = "speed.cloudflare.com"
 PATH_RESOLVER = "/meta"
-RISK_API_HOST = "ipinfo.mehdizrg88.workers.dev"
 TIMEOUT = 10
 
 async def check(host, path, proxy={}):
-    """A generic async HTTP check function."""
+    """A generic async HTTP check function that also returns delay."""
     ssl_context = ssl.create_default_context()
+    start_time = asyncio.get_event_loop().time()
     try:
         ip, port = proxy.get("ip", host), int(proxy.get("port", 443))
         reader, writer = await asyncio.wait_for(
@@ -38,32 +36,15 @@ async def check(host, path, proxy={}):
                    "User-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
         writer.write(payload.encode()); await writer.drain()
         resp_bytes = await reader.read()
+        end_time = asyncio.get_event_loop().time()
+        delay = (end_time - start_time) * 1000
         writer.close(); await writer.wait_closed()
         resp_str = resp_bytes.decode("utf-8", errors="ignore")
-        if "\r\n\r\n" not in resp_str: return {"error": "Malformed response"}
+        if "\r\n\r\n" not in resp_str: return {"error": "Malformed response"}, 0
         _, body = resp_str.split("\r\n\r\n", 1)
-        return json.loads(body)
+        return json.loads(body), delay
     except Exception as e:
-        return {"error": str(e)}
-
-async def get_risk_info(proxy_data: dict):
-    """Fetches risk information by correctly parsing the nested 'security' object."""
-    path = "/"
-    risk_data = await check(RISK_API_HOST, path, proxy=proxy_data)
-    
-    if risk_data and not risk_data.get("error"):
-        # --- THE FIX IS HERE ---
-        # We access the 'security' object first, then get the keys from it.
-        # .get('security', {}) is a safe way to prevent errors if 'security' key is missing.
-        security_info = risk_data.get('security', {})
-        return {
-            "riskScore": security_info.get("riskScore", "N/A"),
-            "riskLevel": security_info.get("riskLevel", "N/A")
-        }
-    return {
-        "riskScore": "Error",
-        "riskLevel": f"Failed to fetch: {risk_data.get('error', 'Unknown')}"
-    }
+        return {"error": str(e)}, 0
 
 async def process_proxy(ip, port):
     """The main processing logic."""
@@ -71,8 +52,8 @@ async def process_proxy(ip, port):
     direct_task = check(IP_RESOLVER, PATH_RESOLVER)
     proxy_task = check(IP_RESOLVER, PATH_RESOLVER, proxy=proxy_data)
     
-    direct_meta = await direct_task
-    proxy_meta = await proxy_task
+    direct_meta, _ = await direct_task
+    proxy_meta, proxy_delay = await proxy_task
 
     direct_ip = direct_meta.get('clientIp')
     proxy_ip = proxy_meta.get('clientIp')
@@ -80,21 +61,18 @@ async def process_proxy(ip, port):
     is_alive = bool(direct_ip and proxy_ip and direct_ip != proxy_ip)
 
     if is_alive:
-        risk_info_task = get_risk_info(proxy_data)
         org_name = re.sub(r'[^a-zA-Z0-9\s]', '', proxy_meta.get("asOrganization", ""))
         country_code = proxy_meta.get("country", "Unknown")
         country = pycountry.countries.get(alpha_2=country_code)
         country_name = country.name if country else "Unknown"
-        risk_info = await risk_info_task
         
         return {
             "ip": ip, "port": port, "proxyip": True,
             "asOrganization": org_name, "countryCode": country_code,
             "countryName": country_name,
             "asn": proxy_meta.get("asn", "Unknown"),
-            "riskScore": risk_info.get("riskScore"),
-            "riskLevel": risk_info.get("riskLevel"),
             "message": f"Success: IP changed from {direct_ip} to {proxy_ip}.",
+            "ping": f"{round(proxy_delay)} ms",
             "httpProtocol": proxy_meta.get("httpProtocol", "Unknown"),
             "latitude": proxy_meta.get("latitude", "Unknown"),
             "longitude": proxy_meta.get("longitude", "Unknown")
@@ -109,21 +87,21 @@ async def process_proxy(ip, port):
 # --- FastAPI App & Runner ---
 app = FastAPI(
     title="Production Proxy Checker API",
-    description="Validates a proxy, uses it to fetch its risk score, and returns full details.",
+    description="Validates a proxy and returns its full details.",
     version="12.0.0"
 )
 
 @app.get("/api/v1/check", tags=["Proxy Checker"])
 async def check_proxy_endpoint(
-    proxy: str = Query(..., description="The proxy to check in 'IP' or 'IP:PORT' format.", example="36.95.152.58")
+    proxyip: str = Query(..., description="The proxy to check in 'IP' or 'IP:PORT' format.", example="36.95.152.58")
 ):
     async with semaphore:
         try:
-            if ":" in proxy:
-                ip, port_str = proxy.rsplit(":", 1)
+            if ":" in proxyip:
+                ip, port_str = proxyip.rsplit(":", 1)
                 port_number = int(port_str)
             else:
-                ip = proxy
+                ip = proxyip
                 port_number = 443
             result_data = await process_proxy(ip, port_number)
             return JSONResponse(content=result_data)
@@ -133,6 +111,5 @@ async def check_proxy_endpoint(
             return JSONResponse(status_code=500, content={"proxyip": False, "error": f"An unexpected internal server error occurred: {e}"})
 
 if __name__ == "__main__":
-    # Remember to change the filename here to match what you saved
     print(f"Starting PRODUCTION server on http://0.0.0.0:{HARDCODED_PORT}")
     uvicorn.run("checker:app", host="0.0.0.0", port=HARDCODED_PORT, reload=False)
