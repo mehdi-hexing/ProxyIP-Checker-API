@@ -81,7 +81,7 @@ async def process_proxy(ip, port):
             "countryName": country_name,
             "asn": proxy_meta.get("asn", "Unknown"),
             "message": f"Success: IP changed from {direct_ip} to {proxy_ip}.",
-            "ping": f"{round(proxy_delay)} ms",
+            "ping": f"{round(proxy_delay)}",
             "httpProtocol": proxy_meta.get("httpProtocol", "Unknown"),
             "latitude": proxy_meta.get("latitude", "Unknown"),
             "longitude": proxy_meta.get("longitude", "Unknown")
