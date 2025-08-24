@@ -6,22 +6,29 @@ import pycountry
 import time
 import asyncio
 import uvicorn
+import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-# --- Settings ---
-# !! Replace with your actual assigned port from serv00 !!
 HARDCODED_PORT = 12345
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-# --- Logic ---
 IP_RESOLVER = "speed.cloudflare.com"
 PATH_RESOLVER = "/meta"
 TIMEOUT = 10
 
+async def get_hosting_provider(ip):
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://ip-api.com/json/{ip}?fields=as")
+            response.raise_for_status()
+            data = response.json()
+            return data.get("as")
+    except (httpx.RequestError, json.JSONDecodeError):
+        return None
+
 async def check(host, path, proxy={}):
-    """A generic async HTTP check function that also returns delay."""
     ssl_context = ssl.create_default_context()
     start_time = asyncio.get_event_loop().time()
     try:
@@ -47,7 +54,6 @@ async def check(host, path, proxy={}):
         return {"error": str(e)}, 0
 
 async def process_proxy(ip, port):
-    """The main processing logic."""
     proxy_data = {"ip": ip, "port": port}
     direct_task = check(IP_RESOLVER, PATH_RESOLVER)
     proxy_task = check(IP_RESOLVER, PATH_RESOLVER, proxy=proxy_data)
@@ -61,14 +67,17 @@ async def process_proxy(ip, port):
     is_alive = bool(direct_ip and proxy_ip and direct_ip != proxy_ip)
 
     if is_alive:
-        org_name = re.sub(r'[^a-zA-Z0-9\s]', '', proxy_meta.get("asOrganization", ""))
+        final_org_name = await get_hosting_provider(ip)
+        if not final_org_name:
+            final_org_name = re.sub(r'[^a-zA-Z0-9\s]', '', proxy_meta.get("asOrganization", ""))
+
         country_code = proxy_meta.get("country", "Unknown")
         country = pycountry.countries.get(alpha_2=country_code)
         country_name = country.name if country else "Unknown"
         
         return {
             "ip": ip, "port": port, "proxyip": True,
-            "asOrganization": org_name, "countryCode": country_code,
+            "asOrganization": final_org_name, "countryCode": country_code,
             "countryName": country_name,
             "asn": proxy_meta.get("asn", "Unknown"),
             "message": f"Success: IP changed from {direct_ip} to {proxy_ip}.",
@@ -84,7 +93,6 @@ async def process_proxy(ip, port):
         elif direct_ip == proxy_ip: reason = f"IP did not change. Both connections showed IP: {direct_ip}"
         return {"ip": ip, "port": port, "proxyip": False, "message": reason}
 
-# --- FastAPI App & Runner ---
 app = FastAPI(
     title="Production Proxy Checker API",
     description="Validates a proxy and returns its full details.",
