@@ -57,8 +57,8 @@ async def get_direct_ip():
                 ip = response.json().get("ip")
                 if ip:
                     return ip
-            except (httpx.RequestError, json.JSONDecodeError, httpx.HTTPStatusError) as e:
-                print(f"[DEBUG] get_direct_ip() failed for {url}: {e}")
+            except (httpx.RequestError, json.JSONDecodeError, httpx.HTTPStatusError):
+                pass
     return None
 
 
@@ -79,16 +79,17 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
                 impersonate="chrome",
                 timeout=TIMEOUT,
             )
-        delay = (asyncio.get_event_loop().time() - start) * 1000
-        print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) status={resp.status_code} body[:300]={resp.text[:300]!r}")
-        if resp.status_code != 200:
-            return {"error": f"HTTP {resp.status_code}"}, 0
-        parsed = parse_trace(resp.text)
-        if not parsed.get("ip"):
-            return {"error": "Malformed trace response"}, 0
-        return parsed, delay
+            delay = (asyncio.get_event_loop().time() - start) * 1000
+
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}"}, 0
+
+            parsed = parse_trace(resp.text)
+            if not parsed.get("ip"):
+                return {"error": "Malformed trace response"}, 0
+
+            return parsed, delay
     except Exception as e:
-        print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) EXCEPTION: {type(e).__name__}: {e}")
         return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
 
 
@@ -97,7 +98,6 @@ async def process_proxy(ip, port):
     proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy_ip=ip, proxy_port=port)
 
     proxy_ip_result = proxy_meta.get('ip')
-
     is_alive = bool(direct_ip and proxy_ip_result and direct_ip != proxy_ip_result)
 
     if is_alive:
@@ -149,6 +149,7 @@ async def check_proxy_endpoint(
             else:
                 ip = proxyip
                 port_number = 443
+
             result_data = await process_proxy(ip, port_number)
             return JSONResponse(content=result_data)
         except ValueError:
