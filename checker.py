@@ -1,14 +1,13 @@
-import socket
-import ssl
-import json
-import re
-import os
-import pycountry
-import time
 import asyncio
+import json
+import os
+import re
+import pycountry
 import uvicorn
 import httpx
-from fastapi import FastAPI, Query, HTTPException
+from curl_cffi.const import CurlOpt
+from curl_cffi.requests import AsyncSession
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 PORT = int(os.environ.get("PORT", 8000))
@@ -19,9 +18,10 @@ IP_RESOLVER = "speed.cloudflare.com"
 PATH_RESOLVER = "/meta"
 TIMEOUT = 10
 
+
 async def get_hosting_provider(ip):
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             response = await client.get(f"http://ip-api.com/json/{ip}?fields=as")
             response.raise_for_status()
             data = response.json()
@@ -29,50 +29,10 @@ async def get_hosting_provider(ip):
     except (httpx.RequestError, json.JSONDecodeError):
         return None
 
-async def check(host, path, proxy={}):
-    ssl_context = ssl.create_default_context()
-    start_time = asyncio.get_event_loop().time()
-    try:
-        ip, port = proxy.get("ip", host), int(proxy.get("port", 443))
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
-                ip, port, ssl=ssl_context, server_hostname=host
-            ),
-            timeout=TIMEOUT
-        )
-        payload = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
-                   "User-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
-        writer.write(payload.encode()); await writer.drain()
-        resp_bytes = await asyncio.wait_for(reader.read(), timeout=TIMEOUT)
-        end_time = asyncio.get_event_loop().time()
-        delay = (end_time - start_time) * 1000
-        writer.close(); await writer.wait_closed()
-        resp_str = resp_bytes.decode("utf-8", errors="ignore")
-        print(f"[DEBUG] check(host={host}, ip={ip}) raw response (first 500 chars):\n{resp_str[:500]}\n---END DEBUG---")
-        if "\r\n\r\n" not in resp_str: return {"error": "Malformed response"}, 0
-        headers, body = resp_str.split("\r\n\r\n", 1)
-        if "chunked" in headers.lower():
-            dechunked = b""
-            remaining = resp_bytes.split(b"\r\n\r\n", 1)[1]
-            while remaining:
-                if b"\r\n" not in remaining: break
-                size_line, rest = remaining.split(b"\r\n", 1)
-                try:
-                    size = int(size_line.strip(), 16)
-                except ValueError:
-                    break
-                if size == 0: break
-                dechunked += rest[:size]
-                remaining = rest[size:].lstrip(b"\r\n")
-            body = dechunked.decode("utf-8", errors="ignore")
-        return json.loads(body), delay
-    except Exception as e:
-        print(f"[DEBUG] check(host={host}) EXCEPTION: {type(e).__name__}: {e}")
-        return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
 
 async def get_direct_ip():
-    """Cloudflare blocks direct requests from datacenter IPs (403), so we
-    use a plain IP-echo service for the baseline/no-proxy IP instead."""
+    """Cloudflare's /meta blocks datacenter-originated requests (403), so the
+    baseline (no-proxy) IP is fetched from a plain IP-echo service instead."""
     urls = [
         "https://api.ipify.org?format=json",
         "https://api64.ipify.org?format=json",
@@ -89,14 +49,43 @@ async def get_direct_ip():
                 print(f"[DEBUG] get_direct_ip() failed for {url}: {e}")
     return None
 
+
+async def check(host, path, proxy_ip=None, proxy_port=443):
+    """Fetch https://{host}{path}, optionally forcing the TCP connection to
+    proxy_ip:proxy_port while keeping SNI/Host as `host` (the 'ProxyIP'
+    trick). Uses curl_cffi with a Chrome TLS fingerprint since Cloudflare's
+    bot management 403s plain-Python TLS clients regardless of source IP."""
+    url = f"https://{host}{path}"
+    curl_options = {}
+    if proxy_ip:
+        curl_options[CurlOpt.RESOLVE] = [f"{host}:{proxy_port}:{proxy_ip}"]
+
+    start = asyncio.get_event_loop().time()
+    try:
+        async with AsyncSession() as session:
+            resp = await session.get(
+                url,
+                impersonate="chrome",
+                timeout=TIMEOUT,
+                curl_options=curl_options,
+            )
+        delay = (asyncio.get_event_loop().time() - start) * 1000
+        print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) status={resp.status_code} body[:300]={resp.text[:300]!r}")
+        if resp.status_code != 200:
+            return {"error": f"HTTP {resp.status_code}"}, 0
+        return resp.json(), delay
+    except Exception as e:
+        print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) EXCEPTION: {type(e).__name__}: {e}")
+        return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
+
+
 async def process_proxy(ip, port):
-    proxy_data = {"ip": ip, "port": port}
     direct_ip = await get_direct_ip()
-    proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy=proxy_data)
+    proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy_ip=ip, proxy_port=port)
 
-    proxy_ip = proxy_meta.get('clientIp')
+    proxy_ip_result = proxy_meta.get('clientIp')
 
-    is_alive = bool(direct_ip and proxy_ip and direct_ip != proxy_ip)
+    is_alive = bool(direct_ip and proxy_ip_result and direct_ip != proxy_ip_result)
 
     if is_alive:
         final_org_name = await get_hosting_provider(ip)
@@ -106,13 +95,13 @@ async def process_proxy(ip, port):
         country_code = proxy_meta.get("country", "Unknown")
         country = pycountry.countries.get(alpha_2=country_code)
         country_name = country.name if country else "Unknown"
-        
+
         return {
             "ip": ip, "port": port, "proxyip": True,
             "asOrganization": final_org_name, "countryCode": country_code,
             "countryName": country_name,
             "asn": proxy_meta.get("asn", "Unknown"),
-            "message": f"Success: IP changed from {direct_ip} to {proxy_ip}.",
+            "message": f"Success: IP changed from {direct_ip} to {proxy_ip_result}.",
             "ping": f"{round(proxy_delay)}",
             "httpProtocol": proxy_meta.get("httpProtocol", "Unknown"),
             "latitude": proxy_meta.get("latitude", "Unknown"),
@@ -120,16 +109,21 @@ async def process_proxy(ip, port):
         }
     else:
         reason = "IP did not change or a connection failed."
-        if not direct_ip: reason = "Direct IP lookup failed (could not reach ipify)."
-        elif not proxy_ip: reason = f"Proxy connection failed: {proxy_meta.get('error', 'Unknown')}"
-        elif direct_ip == proxy_ip: reason = f"IP did not change. Both connections showed IP: {direct_ip}"
+        if not direct_ip:
+            reason = "Direct IP lookup failed (could not reach ipify)."
+        elif not proxy_ip_result:
+            reason = f"Proxy connection failed: {proxy_meta.get('error', 'Unknown')}"
+        elif direct_ip == proxy_ip_result:
+            reason = f"IP did not change. Both connections showed IP: {direct_ip}"
         return {"ip": ip, "port": port, "proxyip": False, "message": reason}
+
 
 app = FastAPI(
     title="Production Proxy Checker API",
     description="Validates a proxy and returns its full details.",
-    version="12.0.0"
+    version="13.0.0"
 )
+
 
 @app.get("/api/v1/check", tags=["Proxy Checker"])
 async def check_proxy_endpoint(
@@ -149,6 +143,7 @@ async def check_proxy_endpoint(
             return JSONResponse(status_code=400, content={"proxyip": False, "error": "Invalid port format."})
         except Exception as e:
             return JSONResponse(status_code=500, content={"proxyip": False, "error": f"An unexpected internal server error occurred: {e}"})
+
 
 if __name__ == "__main__":
     print(f"Starting PRODUCTION server on http://0.0.0.0:{PORT}")
