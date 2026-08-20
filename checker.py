@@ -70,15 +70,30 @@ async def check(host, path, proxy={}):
         print(f"[DEBUG] check(host={host}) EXCEPTION: {type(e).__name__}: {e}")
         return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
 
+async def get_direct_ip():
+    """Cloudflare blocks direct requests from datacenter IPs (403), so we
+    use a plain IP-echo service for the baseline/no-proxy IP instead."""
+    urls = [
+        "https://api.ipify.org?format=json",
+        "https://api64.ipify.org?format=json",
+    ]
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for url in urls:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                ip = response.json().get("ip")
+                if ip:
+                    return ip
+            except (httpx.RequestError, json.JSONDecodeError, httpx.HTTPStatusError) as e:
+                print(f"[DEBUG] get_direct_ip() failed for {url}: {e}")
+    return None
+
 async def process_proxy(ip, port):
     proxy_data = {"ip": ip, "port": port}
-    direct_task = check(IP_RESOLVER, PATH_RESOLVER)
-    proxy_task = check(IP_RESOLVER, PATH_RESOLVER, proxy=proxy_data)
-    
-    direct_meta, _ = await direct_task
-    proxy_meta, proxy_delay = await proxy_task
+    direct_ip = await get_direct_ip()
+    proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy=proxy_data)
 
-    direct_ip = direct_meta.get('clientIp')
     proxy_ip = proxy_meta.get('clientIp')
 
     is_alive = bool(direct_ip and proxy_ip and direct_ip != proxy_ip)
@@ -105,7 +120,7 @@ async def process_proxy(ip, port):
         }
     else:
         reason = "IP did not change or a connection failed."
-        if not direct_ip: reason = f"Direct connection failed: {direct_meta.get('error', 'Unknown')}"
+        if not direct_ip: reason = "Direct IP lookup failed (could not reach ipify)."
         elif not proxy_ip: reason = f"Proxy connection failed: {proxy_meta.get('error', 'Unknown')}"
         elif direct_ip == proxy_ip: reason = f"IP did not change. Both connections showed IP: {direct_ip}"
         return {"ip": ip, "port": port, "proxyip": False, "message": reason}
