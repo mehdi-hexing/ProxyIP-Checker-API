@@ -80,6 +80,10 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
 
 async def process_proxy(ip, port):
     direct_ip = await get_direct_ip()
+
+    diag_meta, _ = await check(IP_RESOLVER, PATH_RESOLVER)
+    print(f"[DEBUG] diagnostic direct-to-real-cloudflare result: {diag_meta}")
+
     proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy_ip=ip, proxy_port=port)
 
     proxy_ip_result = proxy_meta.get('clientIp')
