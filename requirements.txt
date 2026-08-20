@@ -2,3 +2,4 @@ fastapi
 uvicorn
 pycountry
 httpx
+curl_cffi
