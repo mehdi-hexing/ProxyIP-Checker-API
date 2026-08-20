@@ -43,16 +43,32 @@ async def check(host, path, proxy={}):
         payload = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
                    "User-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
         writer.write(payload.encode()); await writer.drain()
-        resp_bytes = await reader.read()
+        resp_bytes = await asyncio.wait_for(reader.read(), timeout=TIMEOUT)
         end_time = asyncio.get_event_loop().time()
         delay = (end_time - start_time) * 1000
         writer.close(); await writer.wait_closed()
         resp_str = resp_bytes.decode("utf-8", errors="ignore")
+        print(f"[DEBUG] check(host={host}, ip={ip}) raw response (first 500 chars):\n{resp_str[:500]}\n---END DEBUG---")
         if "\r\n\r\n" not in resp_str: return {"error": "Malformed response"}, 0
-        _, body = resp_str.split("\r\n\r\n", 1)
+        headers, body = resp_str.split("\r\n\r\n", 1)
+        if "chunked" in headers.lower():
+            dechunked = b""
+            remaining = resp_bytes.split(b"\r\n\r\n", 1)[1]
+            while remaining:
+                if b"\r\n" not in remaining: break
+                size_line, rest = remaining.split(b"\r\n", 1)
+                try:
+                    size = int(size_line.strip(), 16)
+                except ValueError:
+                    break
+                if size == 0: break
+                dechunked += rest[:size]
+                remaining = rest[size:].lstrip(b"\r\n")
+            body = dechunked.decode("utf-8", errors="ignore")
         return json.loads(body), delay
     except Exception as e:
-        return {"error": str(e)}, 0
+        print(f"[DEBUG] check(host={host}) EXCEPTION: {type(e).__name__}: {e}")
+        return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
 
 async def process_proxy(ip, port):
     proxy_data = {"ip": ip, "port": port}
