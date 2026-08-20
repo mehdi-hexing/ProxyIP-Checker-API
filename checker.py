@@ -11,7 +11,7 @@ import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-PORT = int(os.environ.get("PORT", 8000))
+PORT = 8000
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
