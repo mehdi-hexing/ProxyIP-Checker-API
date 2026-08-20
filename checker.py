@@ -11,7 +11,7 @@ import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-PORT = 8000
+PORT = int(os.environ.get("PORT", 8000))
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -36,7 +36,7 @@ async def check(host, path, proxy={}):
         ip, port = proxy.get("ip", host), int(proxy.get("port", 443))
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
-                ip, port, ssl=ssl_context, server_hostname=host if proxy else None
+                ip, port, ssl=ssl_context, server_hostname=host
             ),
             timeout=TIMEOUT
         )
