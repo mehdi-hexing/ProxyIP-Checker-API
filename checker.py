@@ -2,6 +2,7 @@ import socket
 import ssl
 import json
 import re
+import os
 import pycountry
 import time
 import asyncio
@@ -10,7 +11,7 @@ import httpx
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
 
-HARDCODED_PORT = 12345
+PORT = int(os.environ.get("PORT", 8000))
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
@@ -119,5 +120,5 @@ async def check_proxy_endpoint(
             return JSONResponse(status_code=500, content={"proxyip": False, "error": f"An unexpected internal server error occurred: {e}"})
 
 if __name__ == "__main__":
-    print(f"Starting PRODUCTION server on http://0.0.0.0:{HARDCODED_PORT}")
-    uvicorn.run("checker:app", host="0.0.0.0", port=HARDCODED_PORT, reload=False)
+    print(f"Starting PRODUCTION server on http://0.0.0.0:{PORT}")
+    uvicorn.run("checker:app", host="0.0.0.0", port=PORT, reload=False)
