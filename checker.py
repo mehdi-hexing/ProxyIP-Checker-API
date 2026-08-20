@@ -14,9 +14,22 @@ PORT = int(os.environ.get("PORT", 8000))
 CONCURRENCY_LIMIT = 30
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
+# /meta is behind Cloudflare's Bot Management (blocks non-browser clients
+# outright, even with a matching TLS fingerprint). /cdn-cgi/trace is the
+# lightweight, unprotected diagnostic endpoint used by proxy-checker tools.
 IP_RESOLVER = "speed.cloudflare.com"
-PATH_RESOLVER = "/meta"
+PATH_RESOLVER = "/cdn-cgi/trace"
 TIMEOUT = 10
+
+
+def parse_trace(text):
+    """Parse Cloudflare's /cdn-cgi/trace plaintext key=value response."""
+    data = {}
+    for line in text.strip().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            data[key.strip()] = value.strip()
+    return data
 
 
 async def get_hosting_provider(ip):
@@ -31,8 +44,7 @@ async def get_hosting_provider(ip):
 
 
 async def get_direct_ip():
-    """Cloudflare's /meta blocks datacenter-originated requests (403), so the
-    baseline (no-proxy) IP is fetched from a plain IP-echo service instead."""
+    """Baseline (no-proxy) public IP, via a plain IP-echo service."""
     urls = [
         "https://api.ipify.org?format=json",
         "https://api64.ipify.org?format=json",
@@ -53,8 +65,7 @@ async def get_direct_ip():
 async def check(host, path, proxy_ip=None, proxy_port=443):
     """Fetch https://{host}{path}, optionally forcing the TCP connection to
     proxy_ip:proxy_port while keeping SNI/Host as `host` (the 'ProxyIP'
-    trick). Uses curl_cffi with a Chrome TLS fingerprint since Cloudflare's
-    bot management 403s plain-Python TLS clients regardless of source IP."""
+    trick), then parse the cdn-cgi/trace key=value response."""
     url = f"https://{host}{path}"
     curl_options = {}
     if proxy_ip:
@@ -72,7 +83,10 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
         print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) status={resp.status_code} body[:300]={resp.text[:300]!r}")
         if resp.status_code != 200:
             return {"error": f"HTTP {resp.status_code}"}, 0
-        return resp.json(), delay
+        parsed = parse_trace(resp.text)
+        if not parsed.get("ip"):
+            return {"error": "Malformed trace response"}, 0
+        return parsed, delay
     except Exception as e:
         print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) EXCEPTION: {type(e).__name__}: {e}")
         return {"error": f"{type(e).__name__}: {e}" if str(e) else type(e).__name__}, 0
@@ -80,22 +94,18 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
 
 async def process_proxy(ip, port):
     direct_ip = await get_direct_ip()
-
-    diag_meta, _ = await check(IP_RESOLVER, PATH_RESOLVER)
-    print(f"[DEBUG] diagnostic direct-to-real-cloudflare result: {diag_meta}")
-
     proxy_meta, proxy_delay = await check(IP_RESOLVER, PATH_RESOLVER, proxy_ip=ip, proxy_port=port)
 
-    proxy_ip_result = proxy_meta.get('clientIp')
+    proxy_ip_result = proxy_meta.get('ip')
 
     is_alive = bool(direct_ip and proxy_ip_result and direct_ip != proxy_ip_result)
 
     if is_alive:
         final_org_name = await get_hosting_provider(ip)
         if not final_org_name:
-            final_org_name = re.sub(r'[^a-zA-Z0-9\s]', '', proxy_meta.get("asOrganization", ""))
+            final_org_name = "Unknown"
 
-        country_code = proxy_meta.get("country", "Unknown")
+        country_code = proxy_meta.get("loc", "Unknown")
         country = pycountry.countries.get(alpha_2=country_code)
         country_name = country.name if country else "Unknown"
 
@@ -103,12 +113,11 @@ async def process_proxy(ip, port):
             "ip": ip, "port": port, "proxyip": True,
             "asOrganization": final_org_name, "countryCode": country_code,
             "countryName": country_name,
-            "asn": proxy_meta.get("asn", "Unknown"),
+            "colo": proxy_meta.get("colo", "Unknown"),
             "message": f"Success: IP changed from {direct_ip} to {proxy_ip_result}.",
             "ping": f"{round(proxy_delay)}",
-            "httpProtocol": proxy_meta.get("httpProtocol", "Unknown"),
-            "latitude": proxy_meta.get("latitude", "Unknown"),
-            "longitude": proxy_meta.get("longitude", "Unknown")
+            "httpProtocol": proxy_meta.get("http", "Unknown"),
+            "tls": proxy_meta.get("tls", "Unknown"),
         }
     else:
         reason = "IP did not change or a connection failed."
@@ -124,7 +133,7 @@ async def process_proxy(ip, port):
 app = FastAPI(
     title="Production Proxy Checker API",
     description="Validates a proxy and returns its full details.",
-    version="13.0.0"
+    version="14.0.0"
 )
 
 
