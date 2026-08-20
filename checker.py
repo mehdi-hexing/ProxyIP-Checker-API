@@ -62,12 +62,11 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
 
     start = asyncio.get_event_loop().time()
     try:
-        async with AsyncSession() as session:
+        async with AsyncSession(curl_options=curl_options) as session:
             resp = await session.get(
                 url,
                 impersonate="chrome",
                 timeout=TIMEOUT,
-                curl_options=curl_options,
             )
         delay = (asyncio.get_event_loop().time() - start) * 1000
         print(f"[DEBUG] check(host={host}, proxy_ip={proxy_ip}) status={resp.status_code} body[:300]={resp.text[:300]!r}")
