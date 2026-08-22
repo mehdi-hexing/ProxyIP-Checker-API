@@ -32,6 +32,38 @@ def parse_trace(text):
     return data
 
 
+def parse_proxyip_input(proxyip: str):
+    """Parse a proxyip query param into (host, port).
+
+    Accepts:
+      - IPv4:            "1.2.3.4"            -> ("1.2.3.4", 443)
+      - IPv4:port:        "1.2.3.4:8443"        -> ("1.2.3.4", 8443)
+      - bare IPv6:         "2001:db8::1"         -> ("2001:db8::1", 443)
+      - bracketed IPv6:     "[2001:db8::1]"        -> ("2001:db8::1", 443)
+      - bracketed IPv6:port: "[2001:db8::1]:8443"    -> ("2001:db8::1", 8443)
+      - hostname / hostname:port are also supported.
+    A bare (unbracketed) IPv6 address is detected by having 2+ colons,
+    since only IPv6 literals legitimately contain more than one.
+    """
+    proxyip = proxyip.strip()
+
+    if proxyip.startswith('['):
+        if ']:' in proxyip:
+            ip_part, port_str = proxyip.rsplit(']:', 1)
+            return ip_part[1:], int(port_str)
+        return proxyip.strip('[]'), 443
+
+    if proxyip.count(':') >= 2:
+        # Bare IPv6 literal, no port possible without brackets.
+        return proxyip, 443
+
+    if ':' in proxyip:
+        ip, port_str = proxyip.rsplit(':', 1)
+        return ip, int(port_str)
+
+    return proxyip, 443
+
+
 async def get_hosting_provider(ip):
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -69,7 +101,10 @@ async def check(host, path, proxy_ip=None, proxy_port=443):
     url = f"https://{host}{path}"
     curl_options = {}
     if proxy_ip:
-        curl_options[CurlOpt.RESOLVE] = [f"{host}:{proxy_port}:{proxy_ip}"]
+        # libcurl's CURLOPT_RESOLVE requires IPv6 literals to be bracketed
+        # in the ADDRESS field (HOST:PORT:[ADDRESS]), unlike IPv4/hostnames.
+        resolve_addr = f"[{proxy_ip}]" if ':' in proxy_ip else proxy_ip
+        curl_options[CurlOpt.RESOLVE] = [f"{host}:{proxy_port}:{resolve_addr}"]
 
     start = asyncio.get_event_loop().time()
     try:
@@ -143,13 +178,7 @@ async def check_proxy_endpoint(
 ):
     async with semaphore:
         try:
-            if ":" in proxyip:
-                ip, port_str = proxyip.rsplit(":", 1)
-                port_number = int(port_str)
-            else:
-                ip = proxyip
-                port_number = 443
-
+            ip, port_number = parse_proxyip_input(proxyip)
             result_data = await process_proxy(ip, port_number)
             return JSONResponse(content=result_data)
         except ValueError:
@@ -161,3 +190,4 @@ async def check_proxy_endpoint(
 if __name__ == "__main__":
     print(f"Starting PRODUCTION server on http://0.0.0.0:{PORT}")
     uvicorn.run("checker:app", host="0.0.0.0", port=PORT, reload=False)
+
